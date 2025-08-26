@@ -99,22 +99,36 @@ class AdvancedCalculator(QMainWindow):
         main_layout.addWidget(right_panel)
 
     def plot_equation(self):
-        equation_text = self.equation_input.text()
-        if not equation_text:
+        raw_text = self.equation_input.text()
+        if not raw_text:
+            return
+
+        equation_to_parse = raw_text
+        # If user enters "y = sin(x)", only parse the part after "="
+        if '=' in equation_to_parse:
+            try:
+                equation_to_parse = equation_to_parse.split('=', 1)[1].strip()
+            except IndexError:
+                QMessageBox.critical(self, "Error", f"Invalid equation format: {raw_text}")
+                return
+        
+        if not equation_to_parse:
+            QMessageBox.critical(self, "Error", f"No expression found after '=' in '{raw_text}'.")
             return
 
         try:
             x = symbols('x')
-            expr = sympify(equation_text)
+            expr = sympify(equation_to_parse)
             func = lambdify(x, expr, 'numpy')
 
             color = self.plot_colors[self.color_index % len(self.plot_colors)]
             pen = pg.mkPen(color=color, width=2)
             
-            self.plotted_equations.append({'text': equation_text, 'expr': expr, 'pen': pen})
+            # Store the original full text for display, but the parsed expression for calculation
+            self.plotted_equations.append({'text': raw_text, 'expr': expr, 'pen': pen})
             self.color_index += 1
             
-            self.equation_list_widget.addItem(equation_text)
+            self.equation_list_widget.addItem(raw_text)
             self.equation_input.clear()
             self.redraw_plots()
 
