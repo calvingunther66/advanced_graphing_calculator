@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import json
 import subprocess
+import re
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QMessageBox, QGridLayout
@@ -117,6 +118,13 @@ class AdvancedCalculator(QMainWindow):
             return
 
         try:
+            # --- Pre-processing for user-friendly syntax ---
+            # 1. Replace ^ with ** for exponents
+            equation_to_parse = equation_to_parse.replace('^', '**')
+            # 2. Add implicit multiplication, e.g., 4x -> 4*x or (x+1)(x-1) -> (x+1)*(x-1)
+            equation_to_parse = re.sub(r'(\d)([a-zA-Z(])', r'\1*\2', equation_to_parse)
+            equation_to_parse = re.sub(r'(\))([a-zA-Z(])', r'\1*\2', equation_to_parse)
+
             x = symbols('x')
             expr = sympify(equation_to_parse)
             func = lambdify(x, expr, 'numpy')
