@@ -17,6 +17,12 @@ A key feature of this application is its integration with a local Large Language
   - Plotting resolution (the number of points used to draw a curve).
 - **AI-Powered Analysis**: Ask questions in natural language about the plotted equations and receive insights from a locally running LLM (Ollama/gemma3:1b).
 
+## Interactive Features
+
+- **Add Points with Cursor**: Activate "Add Point w/ Cursor" mode to click directly on the graph and add points.
+- **Movable Lines**: Plotted lines can be clicked and dragged to new positions, with their data updating in real-time.
+- **Angle Calculation**: Select any two plotted lines to instantly calculate the angle between them.
+
 ## Technology Stack
 
 - **Backend**: Python
