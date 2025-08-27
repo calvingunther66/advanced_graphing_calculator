@@ -1,5 +1,6 @@
 
 import sys
+import os
 import numpy as np
 import json
 import subprocess
@@ -241,6 +242,8 @@ class AdvancedCalculator(QMainWindow):
             QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
 
 if __name__ == "__main__":
+    # Force X11 backend to avoid Wayland crashes
+    os.environ['QT_QPA_PLATFORM'] = 'xcb'
     app = QApplication(sys.argv)
     main_win = AdvancedCalculator()
     main_win.show()
