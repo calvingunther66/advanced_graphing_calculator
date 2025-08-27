@@ -59,10 +59,26 @@ class AdvancedCalculator(QMainWindow):
         self.data_input.returnPressed.connect(self.plot_data)
         self.clear_data_button.clicked.connect(self.clear_data)
 
+        self.add_point_mode_button = QPushButton("Add Point w/ Cursor")
+        self.add_point_mode_button.setCheckable(True)
+        self.add_point_mode_button.clicked.connect(self.toggle_add_point_mode)
+
+        self.calc_angle_button = QPushButton("Angle Between Lines")
+        self.calc_angle_button.clicked.connect(self.calculate_angle_between_lines)
+
+        data_buttons_layout = QHBoxLayout()
+        data_buttons_layout.addWidget(self.plot_data_button)
+        data_buttons_layout.addWidget(self.clear_data_button)
+
         left_layout.addWidget(QLabel("Points/Lines:"))
         left_layout.addWidget(self.data_input)
-        left_layout.addWidget(self.plot_data_button)
-        left_layout.addWidget(self.clear_data_button)
+        left_layout.addLayout(data_buttons_layout)
+        
+        interactive_buttons_layout = QHBoxLayout()
+        interactive_buttons_layout.addWidget(self.add_point_mode_button)
+        interactive_buttons_layout.addWidget(self.calc_angle_button)
+        left_layout.addLayout(interactive_buttons_layout)
+
         left_layout.addWidget(self.data_list_widget)
 
         # --- LLM Section ---
@@ -115,6 +131,8 @@ class AdvancedCalculator(QMainWindow):
         right_layout.addWidget(control_panel)
 
         self.redraw_button.clicked.connect(self.redraw_plots)
+
+        self.plot_widget.scene().sigMouseClicked.connect(self.mouse_clicked)
 
         main_layout.addWidget(left_panel)
         main_layout.addWidget(right_panel)
@@ -176,8 +194,9 @@ class AdvancedCalculator(QMainWindow):
             line_match = re.match(r'\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)\s*;\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)\s*', raw_text)
             if line_match:
                 x1, y1, x2, y2 = map(float, line_match.groups())
-                self.plotted_data.append({'type': 'line', 'data': ([x1, x2], [y1, y2]), 'pen': pen, 'text': raw_text})
-                self.data_list_widget.addItem(raw_text)
+                list_item = QListWidgetItem(raw_text)
+                self.data_list_widget.addItem(list_item)
+                self.plotted_data.append({'type': 'line', 'data': ([x1, x2], [y1, y2]), 'pen': pen, 'text': raw_text, 'list_item': list_item})
                 self.data_input.clear()
                 self.color_index += 1
                 self.redraw_plots()
@@ -187,8 +206,9 @@ class AdvancedCalculator(QMainWindow):
             point_list = re.findall(r'\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)', raw_text)
             if point_list:
                 points = np.array([(float(p[0]), float(p[1])) for p in point_list])
-                self.plotted_data.append({'type': 'points', 'data': points, 'pen': pen, 'text': raw_text})
-                self.data_list_widget.addItem(raw_text)
+                list_item = QListWidgetItem(raw_text)
+                self.data_list_widget.addItem(list_item)
+                self.plotted_data.append({'type': 'points', 'data': points, 'pen': pen, 'text': raw_text, 'list_item': list_item})
                 self.data_input.clear()
                 self.color_index += 1
                 self.redraw_plots()
@@ -235,16 +255,31 @@ class AdvancedCalculator(QMainWindow):
                 self.plot_widget.plot(x_vals, y_vals, pen=eq_data['pen'], name=eq_data['text'])
 
             # Plot data (points and lines)
-            for data_item in self.plotted_data:
+            for i, data_item in enumerate(self.plotted_data):
                 if data_item['type'] == 'line':
                     x_coords, y_coords = data_item['data']
-                    self.plot_widget.plot(x_coords, y_coords, pen=data_item['pen'], name=data_item['text'])
+                    # Use PlotDataItem for movable lines
+                    plot_item = pg.PlotDataItem(x_coords, y_coords, pen=data_item['pen'], name=data_item['text'], movable=True)
+                    # Connect the movement signal
+                    plot_item.sigRegionChangeFinished.connect(lambda item, index=i: self.line_moved(item, index))
+                    self.plot_widget.addItem(plot_item)
+                    data_item['plot_item'] = plot_item
                 elif data_item['type'] == 'points':
                     points = data_item['data']
-                    self.plot_widget.plot(points[:, 0], points[:, 1], pen=None, symbol='o', symbolPen=data_item['pen'], symbolBrush=data_item['pen'].color(), name=data_item['text'])
+                    plot_item = self.plot_widget.plot(points[:, 0], points[:, 1], pen=None, symbol='o', symbolPen=data_item['pen'], symbolBrush=data_item['pen'].color(), name=data_item['text'])
+                    data_item['plot_item'] = plot_item
 
         except ValueError:
             QMessageBox.critical(self, "Error", "Invalid input for range or resolution. Please enter numbers.")
+
+    def line_moved(self, item, index):
+        new_x, new_y = item.getData()
+        self.plotted_data[index]['data'] = (new_x, new_y)
+        
+        # Update the text in the list widget
+        new_text = f"({new_x[0]:.2f}, {new_y[0]:.2f}); ({new_x[1]:.2f}, {new_y[1]:.2f})"
+        self.plotted_data[index]['text'] = new_text
+        self.plotted_data[index]['list_item'].setText(new_text)
 
     def handle_llm_question(self):
         question = self.llm_question_input.text()
@@ -317,6 +352,73 @@ class AdvancedCalculator(QMainWindow):
             QMessageBox.critical(self, "Error", f"Error communicating with Ollama server: {e.stderr}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
+
+    def toggle_add_point_mode(self, checked):
+        if checked:
+            self.setCursor(pg.QtCore.Qt.CrossCursor)
+        else:
+            self.setCursor(pg.QtCore.Qt.ArrowCursor)
+
+    def mouse_clicked(self, event):
+        if self.add_point_mode_button.isChecked() and event.button() == pg.QtCore.Qt.LeftButton:
+            pos = event.scenePos()
+            vb = self.plot_widget.plotItem.vb
+            if self.plot_widget.sceneBoundingRect().contains(pos):
+                mouse_point = vb.mapSceneToView(pos)
+                x, y = round(mouse_point.x(), 3), round(mouse_point.y(), 3)
+                
+                # Add the new point to the data
+                new_point_text = f"({x}, {y})"
+                color = self.plot_colors[self.color_index % len(self.plot_colors)]
+                pen = pg.mkPen(color=color, width=2)
+                
+                list_item = QListWidgetItem(new_point_text)
+                self.data_list_widget.addItem(list_item)
+
+                self.plotted_data.append({
+                    'type': 'points', 
+                    'data': np.array([[x, y]]), 
+                    'pen': pen, 
+                    'text': new_point_text,
+                    'list_item': list_item
+                })
+                self.color_index += 1
+                self.redraw_plots()
+
+    def calculate_angle_between_lines(self):
+        selected_items = self.data_list_widget.selectedItems()
+        if len(selected_items) != 2:
+            QMessageBox.warning(self, "Selection Error", "Please select exactly two lines from the 'Points/Lines' list.")
+            return
+
+        try:
+            line1_text = selected_items[0].text()
+            line2_text = selected_items[1].text()
+
+            v1 = self.get_line_vector(line1_text)
+            v2 = self.get_line_vector(line2_text)
+
+            if v1 is None or v2 is None:
+                QMessageBox.critical(self, "Error", "Could not parse one or both of the selected items as a line. Ensure they are in the format '(x1, y1); (x2, y2)'.")
+                return
+
+            unit_v1 = v1 / np.linalg.norm(v1)
+            unit_v2 = v2 / np.linalg.norm(v2)
+            dot_product = np.dot(unit_v1, unit_v2)
+            angle_rad = np.arccos(np.clip(dot_product, -1.0, 1.0))
+            angle_deg = np.degrees(angle_rad)
+
+            QMessageBox.information(self, "Angle Calculation", f"The angle between the two lines is:\n{angle_deg:.2f} degrees")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not calculate angle: {e}")
+
+    def get_line_vector(self, line_text):
+        line_match = re.match(r'\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)\s*;\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)\s*', line_text)
+        if line_match:
+            x1, y1, x2, y2 = map(float, line_match.groups())
+            return np.array([x2 - x1, y2 - y1])
+        return None
 
 if __name__ == "__main__":
     # Force X11 backend to avoid Wayland crashes
