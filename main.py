@@ -36,27 +36,33 @@ class AdvancedCalculator(QMainWindow):
         self.equation_input = QLineEdit()
         self.equation_input.setPlaceholderText("Enter equation, e.g., sin(x) / x")
         self.add_button = QPushButton("Plot Equation")
+        self.clear_equations_button = QPushButton("Clear Equations")
         self.equation_list_widget = QListWidget()
 
         self.add_button.clicked.connect(self.plot_equation)
         self.equation_input.returnPressed.connect(self.plot_equation)
+        self.clear_equations_button.clicked.connect(self.clear_equations)
 
         left_layout.addWidget(QLabel("Equations:"))
         left_layout.addWidget(self.equation_input)
         left_layout.addWidget(self.add_button)
+        left_layout.addWidget(self.clear_equations_button)
         left_layout.addWidget(self.equation_list_widget)
 
         self.data_input = QLineEdit()
         self.data_input.setPlaceholderText("e.g., (1, 2), (3, 4) or (1,2);(3,4)")
         self.plot_data_button = QPushButton("Plot Data")
+        self.clear_data_button = QPushButton("Clear Data")
         self.data_list_widget = QListWidget()
 
         self.plot_data_button.clicked.connect(self.plot_data)
         self.data_input.returnPressed.connect(self.plot_data)
+        self.clear_data_button.clicked.connect(self.clear_data)
 
         left_layout.addWidget(QLabel("Points/Lines:"))
         left_layout.addWidget(self.data_input)
         left_layout.addWidget(self.plot_data_button)
+        left_layout.addWidget(self.clear_data_button)
         left_layout.addWidget(self.data_list_widget)
 
         # --- LLM Section ---
@@ -192,6 +198,16 @@ class AdvancedCalculator(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not plot data: {e}")
+
+    def clear_equations(self):
+        self.plotted_equations.clear()
+        self.equation_list_widget.clear()
+        self.redraw_plots()
+
+    def clear_data(self):
+        self.plotted_data.clear()
+        self.data_list_widget.clear()
+        self.redraw_plots()
 
     def redraw_plots(self):
         try:
