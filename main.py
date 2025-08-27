@@ -1,4 +1,3 @@
-
 import sys
 import os
 import numpy as np
@@ -21,6 +20,7 @@ class AdvancedCalculator(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
         
         self.plotted_equations = []
+        self.plotted_data = []
         self.plot_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
         self.color_index = 0
 
@@ -45,6 +45,19 @@ class AdvancedCalculator(QMainWindow):
         left_layout.addWidget(self.equation_input)
         left_layout.addWidget(self.add_button)
         left_layout.addWidget(self.equation_list_widget)
+
+        self.data_input = QLineEdit()
+        self.data_input.setPlaceholderText("e.g., (1, 2), (3, 4) or (1,2);(3,4)")
+        self.plot_data_button = QPushButton("Plot Data")
+        self.data_list_widget = QListWidget()
+
+        self.plot_data_button.clicked.connect(self.plot_data)
+        self.data_input.returnPressed.connect(self.plot_data)
+
+        left_layout.addWidget(QLabel("Points/Lines:"))
+        left_layout.addWidget(self.data_input)
+        left_layout.addWidget(self.plot_data_button)
+        left_layout.addWidget(self.data_list_widget)
 
         # --- LLM Section ---
         llm_label = QLabel("\nAsk a question about the graph:")
@@ -144,6 +157,42 @@ class AdvancedCalculator(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Invalid equation: {e}")
 
+    def plot_data(self):
+        raw_text = self.data_input.text().strip()
+        if not raw_text:
+            return
+
+        try:
+            color = self.plot_colors[self.color_index % len(self.plot_colors)]
+            pen = pg.mkPen(color=color, width=2)
+            
+            # Try to parse as a line: (x1, y1); (x2, y2)
+            line_match = re.match(r'\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)\s*;\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)\s*', raw_text)
+            if line_match:
+                x1, y1, x2, y2 = map(float, line_match.groups())
+                self.plotted_data.append({'type': 'line', 'data': ([x1, x2], [y1, y2]), 'pen': pen, 'text': raw_text})
+                self.data_list_widget.addItem(raw_text)
+                self.data_input.clear()
+                self.color_index += 1
+                self.redraw_plots()
+                return
+
+            # Try to parse as a list of points: (x1, y1), (x2, y2), ...
+            point_list = re.findall(r'\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)', raw_text)
+            if point_list:
+                points = np.array([(float(p[0]), float(p[1])) for p in point_list])
+                self.plotted_data.append({'type': 'points', 'data': points, 'pen': pen, 'text': raw_text})
+                self.data_list_widget.addItem(raw_text)
+                self.data_input.clear()
+                self.color_index += 1
+                self.redraw_plots()
+                return
+
+            QMessageBox.critical(self, "Error", "Invalid data format. Use e.g., '(1, 2), (3, 4)' for points or '(1, 2); (3, 4)' for a line.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not plot data: {e}")
+
     def redraw_plots(self):
         try:
             x_min = float(self.x_min_input.text())
@@ -160,14 +209,23 @@ class AdvancedCalculator(QMainWindow):
             self.plot_widget.setXRange(x_min, x_max, padding=0)
             self.plot_widget.setYRange(y_min, y_max, padding=0)
 
+            # Plot equations
             x_vals = np.linspace(x_min, x_max, resolution)
             x = symbols('x')
-
             for eq_data in self.plotted_equations:
                 func = lambdify(x, eq_data['expr'], 'numpy')
                 y_vals = func(x_vals)
                 y_vals[np.isinf(y_vals)] = np.nan
                 self.plot_widget.plot(x_vals, y_vals, pen=eq_data['pen'], name=eq_data['text'])
+
+            # Plot data (points and lines)
+            for data_item in self.plotted_data:
+                if data_item['type'] == 'line':
+                    x_coords, y_coords = data_item['data']
+                    self.plot_widget.plot(x_coords, y_coords, pen=data_item['pen'], name=data_item['text'])
+                elif data_item['type'] == 'points':
+                    points = data_item['data']
+                    self.plot_widget.plot(points[:, 0], points[:, 1], pen=None, symbol='o', symbolPen=data_item['pen'], symbolBrush=data_item['pen'].color(), name=data_item['text'])
 
         except ValueError:
             QMessageBox.critical(self, "Error", "Invalid input for range or resolution. Please enter numbers.")
@@ -180,8 +238,10 @@ class AdvancedCalculator(QMainWindow):
 
         # 1. Gather Context
         equation_list = [eq['text'] for eq in self.plotted_equations]
+        data_list = [d['text'] for d in self.plotted_data]
         context = {
             "equations": equation_list,
+            "data": data_list,
             "view_range": {
                 "x_min": self.x_min_input.text(),
                 "x_max": self.x_max_input.text(),
@@ -198,13 +258,14 @@ class AdvancedCalculator(QMainWindow):
         
         Here is the current context from the calculator:
         - Plotted Equations: {context['equations']}
+        - Plotted Data (Points/Lines): {context['data']}
         - Current Viewport: X-axis from {context['view_range']['x_min']} to {context['view_range']['x_max']}, Y-axis from {context['view_range']['y_min']} to {context['view_range']['y_max']}.
         - Plotting Resolution: {context['resolution']} points.
         
         User's Question: "{context['user_question']}"
         
         Based on all this information, please provide a concise and helpful answer to the user's question.
-        Explain the mathematical concepts clearly. If the question is about a specific feature of a graph, relate it to the mathematical properties of the equation(s).
+        Explain the mathematical concepts clearly. If the question is about a specific feature of a graph, relate it to the mathematical properties of the equation(s) or data.
         """
 
         # 3. Query Ollama
@@ -215,7 +276,7 @@ class AdvancedCalculator(QMainWindow):
                 "stream": False
             }
             command = [
-                'curl', '-s', 'http://localhost:11434/api/generate', 
+                'curl', '-s', 'http://localhost:11434/api/generate',
                 '-d', json.dumps(payload)
             ]
             
