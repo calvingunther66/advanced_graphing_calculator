@@ -6,9 +6,10 @@ import subprocess
 import re
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QListWidget, QMessageBox, QGridLayout
+    QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem, QMessageBox, QGridLayout
 )
 import pyqtgraph as pg
+from pyqtgraph.Qt import QtGui
 from sympy import sympify, symbols
 from sympy.utilities.lambdify import lambdify
 
@@ -23,6 +24,10 @@ class AdvancedCalculator(QMainWindow):
         self.plotted_data = []
         self.plot_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
         self.color_index = 0
+
+        self.selected_equation_for_points = None
+        self.moving_point_index = -1
+        self.moving_point_original_pos = None
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -49,6 +54,18 @@ class AdvancedCalculator(QMainWindow):
         left_layout.addWidget(self.clear_equations_button)
         left_layout.addWidget(self.equation_list_widget)
 
+        # Equation selection and point placement
+        equation_interaction_layout = QHBoxLayout()
+        self.select_equation_button = QPushButton("Select Equation")
+        self.select_equation_button.clicked.connect(self.select_equation_for_points)
+        equation_interaction_layout.addWidget(self.select_equation_button)
+
+        self.add_point_to_equation_button = QPushButton("Add Point to Eq.")
+        self.add_point_to_equation_button.setCheckable(True)
+        self.add_point_to_equation_button.clicked.connect(self.toggle_add_point_to_equation_mode)
+        equation_interaction_layout.addWidget(self.add_point_to_equation_button)
+        left_layout.addLayout(equation_interaction_layout)
+
         self.data_input = QLineEdit()
         self.data_input.setPlaceholderText("e.g., (1, 2), (3, 4) or (1,2);(3,4)")
         self.plot_data_button = QPushButton("Plot Data")
@@ -66,9 +83,18 @@ class AdvancedCalculator(QMainWindow):
         self.calc_angle_button = QPushButton("Angle Between Lines")
         self.calc_angle_button.clicked.connect(self.calculate_angle_between_lines)
 
-        data_buttons_layout = QHBoxLayout()
-        data_buttons_layout.addWidget(self.plot_data_button)
-        data_buttons_layout.addWidget(self.clear_data_button)
+        self.plot_polyline_button = QPushButton("Plot Continuous Line")
+        self.plot_polyline_button.clicked.connect(self.plot_polyline)
+
+        self.plot_infinite_line_button = QPushButton("Plot Infinite Line")
+        self.plot_infinite_line_button.clicked.connect(self.plot_infinite_line)
+
+        data_buttons_layout = QGridLayout()
+        data_buttons_layout.addWidget(self.plot_data_button, 0, 0)
+        data_buttons_layout.addWidget(self.clear_data_button, 0, 1)
+        data_buttons_layout.addWidget(self.plot_polyline_button, 1, 0)
+        data_buttons_layout.addWidget(self.plot_infinite_line_button, 1, 1)
+
 
         left_layout.addWidget(QLabel("Points/Lines:"))
         left_layout.addWidget(self.data_input)
@@ -77,6 +103,12 @@ class AdvancedCalculator(QMainWindow):
         interactive_buttons_layout = QHBoxLayout()
         interactive_buttons_layout.addWidget(self.add_point_mode_button)
         interactive_buttons_layout.addWidget(self.calc_angle_button)
+
+        self.move_point_button = QPushButton("Move Point")
+        self.move_point_button.setCheckable(True)
+        self.move_point_button.clicked.connect(self.toggle_move_point_mode)
+        interactive_buttons_layout.addWidget(self.move_point_button)
+
         left_layout.addLayout(interactive_buttons_layout)
 
         left_layout.addWidget(self.data_list_widget)
@@ -108,7 +140,6 @@ class AdvancedCalculator(QMainWindow):
         # --- Control Panel ---
         control_panel = QWidget()
         control_layout = QGridLayout(control_panel)
-        control_panel.setFixedHeight(80)
 
         self.x_min_input = QLineEdit("-10")
         self.x_max_input = QLineEdit("10")
@@ -128,11 +159,34 @@ class AdvancedCalculator(QMainWindow):
         control_layout.addWidget(QLabel("Resolution (points):"), 0, 4)
         control_layout.addWidget(self.resolution_input, 1, 4)
         control_layout.addWidget(self.redraw_button, 1, 5)
+
+        # Zoom and Pan buttons
+        self.zoom_in_button = QPushButton("Zoom In (+)")
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        control_layout.addWidget(self.zoom_in_button, 2, 0)
+
+        self.zoom_out_button = QPushButton("Zoom Out (-)")
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+        control_layout.addWidget(self.zoom_out_button, 2, 1)
+
+        self.pan_left_button = QPushButton("Pan Left (<)")
+        self.pan_left_button.clicked.connect(self.pan_left)
+        control_layout.addWidget(self.pan_left_button, 2, 2)
+
+        self.pan_right_button = QPushButton("Pan Right (>)")
+        self.pan_right_button.clicked.connect(self.pan_right)
+        control_layout.addWidget(self.pan_right_button, 2, 3)
+
+        self.pan_up_button = QPushButton("Pan Up (^)")
+        self.pan_up_button.clicked.connect(self.pan_up)
+        control_layout.addWidget(self.pan_up_button, 3, 0)
+
+        self.pan_down_button = QPushButton("Pan Down (v)")
+        self.pan_down_button.clicked.connect(self.pan_down)
+        control_layout.addWidget(self.pan_down_button, 3, 1)
         right_layout.addWidget(control_panel)
 
         self.redraw_button.clicked.connect(self.redraw_plots)
-
-        self.plot_widget.scene().sigMouseClicked.connect(self.mouse_clicked)
 
         main_layout.addWidget(left_panel)
         main_layout.addWidget(right_panel)
@@ -181,6 +235,39 @@ class AdvancedCalculator(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Invalid equation: {e}")
 
+    def select_equation_for_points(self):
+        selected_items = self.equation_list_widget.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "Selection Error", "Please select an equation from the list first.")
+            self.selected_equation_for_points = None
+            return
+
+        selected_text = selected_items[0].text()
+        # Find the corresponding equation data
+        for eq_data in self.plotted_equations:
+            if eq_data['text'] == selected_text:
+                self.selected_equation_for_points = eq_data
+                QMessageBox.information(self, "Equation Selected", f"'{selected_text}' selected for point placement.")
+                return
+        self.selected_equation_for_points = None
+        QMessageBox.critical(self, "Error", "Selected equation not found in plotted equations.")
+
+    def toggle_add_point_to_equation_mode(self, checked):
+        if checked:
+            if self.selected_equation_for_points is None:
+                QMessageBox.warning(self, "Mode Error", "Please select an equation first before enabling 'Add Point to Eq.' mode.")
+                self.add_point_to_equation_button.setChecked(False)
+                return
+            self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.CrossCursor))
+        else:
+            self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.ArrowCursor))
+
+    def toggle_move_point_mode(self, checked):
+        if checked:
+            self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.CrossCursor))
+        else:
+            self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.ArrowCursor))
+
     def plot_data(self):
         raw_text = self.data_input.text().strip()
         if not raw_text:
@@ -219,9 +306,62 @@ class AdvancedCalculator(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not plot data: {e}")
 
+    def plot_polyline(self):
+        raw_text = self.data_input.text().strip()
+        if not raw_text:
+            return
+
+        try:
+            color = self.plot_colors[self.color_index % len(self.plot_colors)]
+            pen = pg.mkPen(color=color, width=2)
+            
+            point_list = re.findall(r'\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)', raw_text)
+            if point_list and len(point_list) > 1:
+                points = np.array([(float(p[0]), float(p[1])) for p in point_list])
+                list_item = QListWidgetItem(raw_text)
+                self.data_list_widget.addItem(list_item)
+                self.plotted_data.append({'type': 'polyline', 'data': points, 'pen': pen, 'text': raw_text, 'list_item': list_item})
+                self.data_input.clear()
+                self.color_index += 1
+                self.redraw_plots()
+            else:
+                QMessageBox.critical(self, "Error", "Invalid data format or not enough points. Use e.g., '(1, 2), (3, 4), (5, 1)' for a continuous line.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not plot continuous line: {e}")
+
+    def plot_infinite_line(self):
+        raw_text = self.data_input.text().strip()
+        if not raw_text:
+            return
+
+        try:
+            color = self.plot_colors[self.color_index % len(self.plot_colors)]
+            pen = pg.mkPen(color=color, width=2)
+            
+            line_match = re.match(r'\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)\s*;\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)\s*', raw_text)
+            if line_match:
+                x1, y1, x2, y2 = map(float, line_match.groups())
+                
+                # Calculate angle
+                angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                
+                list_item = QListWidgetItem(raw_text + " (infinite)")
+                self.data_list_widget.addItem(list_item)
+                self.plotted_data.append({'type': 'infinite_line', 'pos': [x1, y1], 'angle': angle, 'pen': pen, 'text': raw_text + " (infinite)", 'list_item': list_item})
+                self.data_input.clear()
+                self.color_index += 1
+                self.redraw_plots()
+            else:
+                QMessageBox.critical(self, "Error", "Invalid data format for infinite line. Use e.g., '(1, 2); (3, 4)'.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not plot infinite line: {e}")
+
     def clear_equations(self):
         self.plotted_equations.clear()
         self.equation_list_widget.clear()
+        self.selected_equation_for_points = None # Clear selected equation
         self.redraw_plots()
 
     def clear_data(self):
@@ -268,6 +408,20 @@ class AdvancedCalculator(QMainWindow):
                     points = data_item['data']
                     plot_item = self.plot_widget.plot(points[:, 0], points[:, 1], pen=None, symbol='o', symbolPen=data_item['pen'], symbolBrush=data_item['pen'].color(), name=data_item['text'])
                     data_item['plot_item'] = plot_item
+                elif data_item['type'] == 'polyline':
+                    points = data_item['data']
+                    plot_item = self.plot_widget.plot(points[:, 0], points[:, 1], pen=data_item['pen'], name=data_item['text'])
+                    data_item['plot_item'] = plot_item
+                elif data_item['type'] == 'infinite_line':
+                    line = pg.InfiniteLine(pos=data_item['pos'], angle=data_item['angle'], pen=data_item['pen'], name=data_item['text'])
+                    self.plot_widget.addItem(line)
+                    data_item['plot_item'] = line
+                elif data_item['type'] == 'equation_point':
+                    points = data_item['data']
+                    plot_item = self.plot_widget.plot(points[:, 0], points[:, 1], pen=None, symbol='x', symbolSize=10, symbolPen=data_item['pen'], symbolBrush=data_item['pen'].color(), name=data_item['text'])
+                    data_item['plot_item'] = plot_item
+                    # Connect the movement signal for equation points
+                    # plot_item.sigRegionChangeFinished.connect(lambda item, index=i: self.equation_point_moved(item, index)) # Removed movable=True and signal connection
 
         except ValueError:
             QMessageBox.critical(self, "Error", "Invalid input for range or resolution. Please enter numbers.")
@@ -278,6 +432,15 @@ class AdvancedCalculator(QMainWindow):
         
         # Update the text in the list widget
         new_text = f"({new_x[0]:.2f}, {new_y[0]:.2f}); ({new_x[1]:.2f}, {new_y[1]:.2f})"
+        self.plotted_data[index]['text'] = new_text
+        self.plotted_data[index]['list_item'].setText(new_text)
+
+    def equation_point_moved(self, item, index):
+        new_x, new_y = item.getData()
+        # For now, just update the stored data.
+        # In future, this is where the equation update logic or constraint logic would go.
+        self.plotted_data[index]['data'] = np.array([[new_x[0], new_y[0]]])
+        new_text = f"Eq. Point ({new_x[0]:.3f}, {new_y[0]:.3f})"
         self.plotted_data[index]['text'] = new_text
         self.plotted_data[index]['list_item'].setText(new_text)
 
@@ -353,37 +516,197 @@ class AdvancedCalculator(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
 
+    def zoom_in(self):
+        self._zoom(0.8)
+
+    def zoom_out(self):
+        self._zoom(1.25)
+
+    def _zoom(self, factor):
+        try:
+            x_min = float(self.x_min_input.text())
+            x_max = float(self.x_max_input.text())
+            y_min = float(self.y_min_input.text())
+            y_max = float(self.y_max_input.text())
+
+            x_center = (x_min + x_max) / 2
+            y_center = (y_min + y_max) / 2
+
+            new_x_range = (x_max - x_min) * factor
+            new_y_range = (y_max - y_min) * factor
+
+            self.x_min_input.setText(str(x_center - new_x_range / 2))
+            self.x_max_input.setText(str(x_center + new_x_range / 2))
+            self.y_min_input.setText(str(y_center - new_y_range / 2))
+            self.y_max_input.setText(str(y_center + new_y_range / 2))
+
+            self.redraw_plots()
+        except ValueError:
+            QMessageBox.critical(self, "Error", "Invalid input for range. Please enter numbers.")
+
+    def pan_left(self):
+        self._pan(-0.1, 0)
+
+    def pan_right(self):
+        self._pan(0.1, 0)
+
+    def pan_up(self):
+        self._pan(0, 0.1)
+
+    def pan_down(self):
+        self._pan(0, -0.1)
+
+    def _pan(self, x_factor, y_factor):
+        try:
+            x_min = float(self.x_min_input.text())
+            x_max = float(self.x_max_input.text())
+            y_min = float(self.y_min_input.text())
+            y_max = float(self.y_max_input.text())
+
+            x_range = x_max - x_min
+            y_range = y_max - y_min
+
+            x_offset = x_range * x_factor
+            y_offset = y_range * y_factor
+
+            self.x_min_input.setText(str(x_min + x_offset))
+            self.x_max_input.setText(str(x_max + x_offset))
+            self.y_min_input.setText(str(y_min + y_offset))
+            self.y_max_input.setText(str(y_max + y_offset))
+
+            self.redraw_plots()
+        except ValueError:
+            QMessageBox.critical(self, "Error", "Invalid input for range. Please enter numbers.")
+
     def toggle_add_point_mode(self, checked):
         if checked:
-            self.setCursor(pg.QtCore.Qt.CrossCursor)
+            try:
+                # Works for PyQt6 and PySide6
+                self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.CrossCursor))
+            except AttributeError:
+                # Works for PyQt5 and PySide2
+                self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CrossCursor))
         else:
-            self.setCursor(pg.QtCore.Qt.ArrowCursor)
+            try:
+                # Works for PyQt6 and PySide6
+                self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.ArrowCursor))
+            except AttributeError:
+                # Works for PyQt5 and PySide2
+                self.setCursor(QtGui.QCursor(pg.QtCore.Qt.ArrowCursor))
 
-    def mouse_clicked(self, event):
-        if self.add_point_mode_button.isChecked() and event.button() == pg.QtCore.Qt.LeftButton:
-            pos = event.scenePos()
-            vb = self.plot_widget.plotItem.vb
-            if self.plot_widget.sceneBoundingRect().contains(pos):
-                mouse_point = vb.mapSceneToView(pos)
-                x, y = round(mouse_point.x(), 3), round(mouse_point.y(), 3)
+    def mousePressEvent(self, event):
+        try:
+            # Works for PyQt6 and PySide6
+            left_button = pg.QtCore.Qt.MouseButton.LeftButton
+        except AttributeError:
+            # Works for PyQt5 and PySide2
+            left_button = pg.QtCore.Qt.LeftButton
+
+        if self.add_point_mode_button.isChecked() and event.button() == left_button:
+            # Get mouse position relative to PlotWidget
+            local_pos = self.plot_widget.mapFromGlobal(event.globalPosition().toPoint())
+            
+            # Map local position to ViewBox coordinates
+            mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(self.plot_widget.mapToScene(local_pos))
+            x, y = round(mouse_point.x(), 3), round(mouse_point.y(), 3)
+            
+            # Add the new point to the data
+            new_point_text = f"({x}, {y})"
+            color = self.plot_colors[self.color_index % len(self.plot_colors)]
+            pen = pg.mkPen(color=color, width=2)
+            
+            list_item = QListWidgetItem(new_point_text)
+            self.data_list_widget.addItem(list_item)
+
+            self.plotted_data.append({
+                'type': 'points', 
+                'data': np.array([[x, y]]), 
+                'pen': pen, 
+                'text': new_point_text,
+                'list_item': list_item
+            })
+            self.color_index += 1
+            self.redraw_plots()
+        elif self.add_point_to_equation_button.isChecked() and event.button() == left_button:
+            if self.selected_equation_for_points is None:
+                QMessageBox.warning(self, "Error", "No equation selected for point placement.")
+                return
+            
+            # Get mouse position relative to PlotWidget
+            local_pos = self.plot_widget.mapFromGlobal(event.globalPosition().toPoint())
+            
+            # Map local position to ViewBox coordinates
+            mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(self.plot_widget.mapToScene(local_pos))
+            x_val = mouse_point.x()
+            
+            # Evaluate the selected equation at x_val
+            try:
+                x_sym = symbols('x')
+                func = lambdify(x_sym, self.selected_equation_for_points['expr'], 'numpy')
+                y_val = func(x_val)
                 
-                # Add the new point to the data
-                new_point_text = f"({x}, {y})"
-                color = self.plot_colors[self.color_index % len(self.plot_colors)]
+                new_point_text = f"Eq. Point ({x_val:.3f}, {y_val:.3f})"
+                color = self.selected_equation_for_points['pen'].color() # Use equation's color
                 pen = pg.mkPen(color=color, width=2)
                 
                 list_item = QListWidgetItem(new_point_text)
                 self.data_list_widget.addItem(list_item)
 
                 self.plotted_data.append({
-                    'type': 'points', 
-                    'data': np.array([[x, y]]), 
+                    'type': 'equation_point', 
+                    'data': np.array([[x_val, y_val]]), 
                     'pen': pen, 
                     'text': new_point_text,
                     'list_item': list_item
                 })
-                self.color_index += 1
+                self.color_index += 1 # Still increment for color cycling for other plots
                 self.redraw_plots()
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not evaluate equation at this point: {e}")
+        elif self.move_point_button.isChecked() and event.button() == left_button:
+            # Get mouse position relative to PlotWidget
+            local_pos = self.plot_widget.mapFromGlobal(event.globalPosition().toPoint())
+            
+            # Map local position to ViewBox coordinates
+            mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(self.plot_widget.mapToScene(local_pos))
+            # Check if an equation point is clicked
+            for i, data_item in enumerate(self.plotted_data):
+                if data_item['type'] == 'equation_point':
+                    point_pos = data_item['data'][0]
+                    # Simple distance check (adjust tolerance as needed)
+                    distance = np.sqrt((mouse_point.x() - point_pos[0])**2 + (mouse_point.y() - point_pos[1])**2)
+                    if distance < 0.5: # Tolerance for clicking a point
+                        self.moving_point_index = i
+                        self.moving_point_original_pos = point_pos
+                        self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.ClosedHandCursor))
+                        break
+        super().mousePressEvent(event) # Call super class method
+
+    def mouseMoveEvent(self, event):
+        if self.moving_point_index != -1:
+            # Get mouse position relative to PlotWidget
+            local_pos = self.plot_widget.mapFromGlobal(event.globalPosition().toPoint())
+            
+            # Map local position to ViewBox coordinates
+            mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(self.plot_widget.mapToScene(local_pos))
+            x, y = mouse_point.x(), mouse_point.y()
+            
+            # Update the point's data
+            self.plotted_data[self.moving_point_index]['data'] = np.array([[x, y]])
+            new_text = f"Eq. Point ({x:.3f}, {y:.3f})"
+            self.plotted_data[self.moving_point_index]['text'] = new_text
+            self.plotted_data[self.moving_point_index]['list_item'].setText(new_text)
+            
+            self.redraw_plots()
+        super().mouseMoveEvent(event) # Call super class method
+
+    def mouseReleaseEvent(self, event):
+        if self.moving_point_index != -1:
+            self.moving_point_index = -1
+            self.moving_point_original_pos = None
+            self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.ArrowCursor))
+        super().mouseReleaseEvent(event) # Call super class method
 
     def calculate_angle_between_lines(self):
         selected_items = self.data_list_widget.selectedItems()
