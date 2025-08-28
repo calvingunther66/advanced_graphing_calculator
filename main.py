@@ -2,16 +2,62 @@ import sys
 import os
 import numpy as np
 import json
-import subprocess
 import re
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem, QMessageBox, QGridLayout
 )
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtGui
+from pyqtgraph.Qt import QtGui, QtCore
 from sympy import sympify, symbols
 from sympy.utilities.lambdify import lambdify
+
+# --- Worker for Non-Blocking AI Requests ---
+class OllamaWorker(QtCore.QObject):
+    """
+    Worker thread for handling Ollama requests without blocking the UI.
+    """
+    # Signal to emit when the request is finished
+    # It will carry the response text (str) and a success flag (bool)
+    finished = QtCore.pyqtSignal(str, bool)
+
+    def __init__(self, prompt):
+        super().__init__()
+        self.prompt = prompt
+
+    @QtCore.pyqtSlot()
+    def run(self):
+        """
+        Execute the network request to Ollama using the 'requests' library.
+        """
+        try:
+            import requests # Import requests library here
+
+            payload = {
+                "model": "gemma3:1b",
+                "prompt": self.prompt,
+                "stream": False
+            }
+            # Set a timeout to prevent the application from waiting indefinitely
+            response = requests.post(
+                'http://localhost:11434/api/generate',
+                json=payload,
+                timeout=60  # Wait for a maximum of 60 seconds
+            )
+            response.raise_for_status()  # Raise an exception for bad status codes (e.g., 404, 500)
+
+            response_data = response.json()
+            llm_answer = response_data.get("response", "No answer received from model.")
+            self.finished.emit(llm_answer, True)
+
+        except requests.exceptions.RequestException as e:
+            # Handle network-related errors (e.g., connection refused, timeout)
+            error_message = f"Network error communicating with Ollama: {e}"
+            self.finished.emit(error_message, False)
+        except Exception as e:
+            # Handle other potential errors (e.g., JSON parsing)
+            error_message = f"An unexpected error occurred: {e}"
+            self.finished.emit(error_message, False)
 
 class AdvancedCalculator(QMainWindow):
     def __init__(self):
@@ -420,9 +466,7 @@ class AdvancedCalculator(QMainWindow):
                     points = data_item['data']
                     plot_item = self.plot_widget.plot(points[:, 0], points[:, 1], pen=None, symbol='x', symbolSize=10, symbolPen=data_item['pen'], symbolBrush=data_item['pen'].color(), name=data_item['text'])
                     data_item['plot_item'] = plot_item
-                    # Connect the movement signal for equation points
-                    # plot_item.sigRegionChangeFinished.connect(lambda item, index=i: self.equation_point_moved(item, index)) # Removed movable=True and signal connection
-
+                    
         except ValueError:
             QMessageBox.critical(self, "Error", "Invalid input for range or resolution. Please enter numbers.")
 
@@ -438,7 +482,6 @@ class AdvancedCalculator(QMainWindow):
     def equation_point_moved(self, item, index):
         new_x, new_y = item.getData()
         # For now, just update the stored data.
-        # In future, this is where the equation update logic or constraint logic would go.
         self.plotted_data[index]['data'] = np.array([[new_x[0], new_y[0]]])
         new_text = f"Eq. Point ({new_x[0]:.3f}, {new_y[0]:.3f})"
         self.plotted_data[index]['text'] = new_text
@@ -450,7 +493,7 @@ class AdvancedCalculator(QMainWindow):
             QMessageBox.warning(self, "Error", "Please enter a question.")
             return
 
-        # 1. Gather Context
+        # Gather context from the application state
         equation_list = [eq['text'] for eq in self.plotted_equations]
         data_list = [d['text'] for d in self.plotted_data]
         context = {
@@ -466,7 +509,7 @@ class AdvancedCalculator(QMainWindow):
             "user_question": question
         }
 
-        # 2. Construct the Prompt
+        # Construct the prompt for the LLM
         prompt = f"""You are a helpful mathematics assistant integrated into a graphing calculator application.
         Your purpose is to analyze the provided graph data and answer a user's question.
         
@@ -482,39 +525,49 @@ class AdvancedCalculator(QMainWindow):
         Explain the mathematical concepts clearly. If the question is about a specific feature of a graph, relate it to the mathematical properties of the equation(s) or data.
         """
 
-        # 3. Query Ollama
-        try:
-            payload = {
-                "model": "gemma3:1b",
-                "prompt": prompt,
-                "stream": False
-            }
-            command = [
-                'curl', '-s', 'http://localhost:11434/api/generate',
-                '-d', json.dumps(payload)
-            ]
-            
-            # Show a temporary message
-            loading_msg = QMessageBox(self)
-            loading_msg.setWindowTitle("Thinking...")
-            loading_msg.setText("Asking Gemma... Please wait.")
-            loading_msg.setStandardButtons(QMessageBox.StandardButton.NoButton)
-            loading_msg.show()
-            QApplication.processEvents() # Allow UI to update
+        # --- Non-Blocking Threading Logic ---
+        # Disable UI elements to prevent multiple submissions
+        self.ask_llm_button.setEnabled(False)
+        self.llm_question_input.setReadOnly(True)
 
-            result = subprocess.run(command, capture_output=True, text=True, check=True)
-            response_data = json.loads(result.stdout)
-            llm_answer = response_data.get("response", "No answer received from model.")
-            
-            loading_msg.hide()
-            QMessageBox.information(self, "Gemma's Answer", llm_answer)
+        # Show a non-blocking "Thinking..." message
+        self.loading_msg = QMessageBox(self)
+        self.loading_msg.setWindowTitle("Thinking...")
+        self.loading_msg.setText("Asking Gemma... Please wait.")
+        self.loading_msg.setStandardButtons(QMessageBox.StandardButton.NoButton)
+        self.loading_msg.show()
 
-        except FileNotFoundError:
-            QMessageBox.critical(self, "Error", "`curl` command not found. Please ensure it is installed and in your PATH.")
-        except subprocess.CalledProcessError as e:
-            QMessageBox.critical(self, "Error", f"Error communicating with Ollama server: {e.stderr}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
+        # 1. Create a QThread and an OllamaWorker instance
+        self.thread = QtCore.QThread()
+        self.worker = OllamaWorker(prompt)
+
+        # 2. Move the worker to the new thread
+        self.worker.moveToThread(self.thread)
+
+        # 3. Connect signals and slots for communication
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.handle_llm_response)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+
+        # 4. Start the thread to execute the request
+        self.thread.start()
+
+    def handle_llm_response(self, response_text, success):
+        # This method is called when the worker thread is finished
+        if hasattr(self, 'loading_msg'):
+            self.loading_msg.hide()
+
+        if success:
+            QMessageBox.information(self, "Gemma's Answer", response_text)
+        else:
+            # On failure, the response_text contains the error message
+            QMessageBox.critical(self, "LLM Error", response_text)
+
+        # Re-enable the UI elements
+        self.ask_llm_button.setEnabled(True)
+        self.llm_question_input.setReadOnly(False)
 
     def zoom_in(self):
         self._zoom(0.8)
@@ -580,37 +633,18 @@ class AdvancedCalculator(QMainWindow):
 
     def toggle_add_point_mode(self, checked):
         if checked:
-            try:
-                # Works for PyQt6 and PySide6
-                self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.CrossCursor))
-            except AttributeError:
-                # Works for PyQt5 and PySide2
-                self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CrossCursor))
+            self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.CrossCursor))
         else:
-            try:
-                # Works for PyQt6 and PySide6
-                self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.ArrowCursor))
-            except AttributeError:
-                # Works for PyQt5 and PySide2
-                self.setCursor(QtGui.QCursor(pg.QtCore.Qt.ArrowCursor))
+            self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.ArrowCursor))
 
     def mousePressEvent(self, event):
-        try:
-            # Works for PyQt6 and PySide6
-            left_button = pg.QtCore.Qt.MouseButton.LeftButton
-        except AttributeError:
-            # Works for PyQt5 and PySide2
-            left_button = pg.QtCore.Qt.LeftButton
+        left_button = pg.QtCore.Qt.MouseButton.LeftButton
 
         if self.add_point_mode_button.isChecked() and event.button() == left_button:
-            # Get mouse position relative to PlotWidget
             local_pos = self.plot_widget.mapFromGlobal(event.globalPosition().toPoint())
-            
-            # Map local position to ViewBox coordinates
             mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(self.plot_widget.mapToScene(local_pos))
             x, y = round(mouse_point.x(), 3), round(mouse_point.y(), 3)
             
-            # Add the new point to the data
             new_point_text = f"({x}, {y})"
             color = self.plot_colors[self.color_index % len(self.plot_colors)]
             pen = pg.mkPen(color=color, width=2)
@@ -632,21 +666,17 @@ class AdvancedCalculator(QMainWindow):
                 QMessageBox.warning(self, "Error", "No equation selected for point placement.")
                 return
             
-            # Get mouse position relative to PlotWidget
             local_pos = self.plot_widget.mapFromGlobal(event.globalPosition().toPoint())
-            
-            # Map local position to ViewBox coordinates
             mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(self.plot_widget.mapToScene(local_pos))
             x_val = mouse_point.x()
             
-            # Evaluate the selected equation at x_val
             try:
                 x_sym = symbols('x')
                 func = lambdify(x_sym, self.selected_equation_for_points['expr'], 'numpy')
                 y_val = func(x_val)
                 
                 new_point_text = f"Eq. Point ({x_val:.3f}, {y_val:.3f})"
-                color = self.selected_equation_for_points['pen'].color() # Use equation's color
+                color = self.selected_equation_for_points['pen'].color()
                 pen = pg.mkPen(color=color, width=2)
                 
                 list_item = QListWidgetItem(new_point_text)
@@ -659,54 +689,45 @@ class AdvancedCalculator(QMainWindow):
                     'text': new_point_text,
                     'list_item': list_item
                 })
-                self.color_index += 1 # Still increment for color cycling for other plots
+                self.color_index += 1
                 self.redraw_plots()
 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not evaluate equation at this point: {e}")
         elif self.move_point_button.isChecked() and event.button() == left_button:
-            # Get mouse position relative to PlotWidget
             local_pos = self.plot_widget.mapFromGlobal(event.globalPosition().toPoint())
-            
-            # Map local position to ViewBox coordinates
             mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(self.plot_widget.mapToScene(local_pos))
-            # Check if an equation point is clicked
             for i, data_item in enumerate(self.plotted_data):
                 if data_item['type'] == 'equation_point':
                     point_pos = data_item['data'][0]
-                    # Simple distance check (adjust tolerance as needed)
                     distance = np.sqrt((mouse_point.x() - point_pos[0])**2 + (mouse_point.y() - point_pos[1])**2)
-                    if distance < 0.5: # Tolerance for clicking a point
+                    if distance < 0.5:
                         self.moving_point_index = i
                         self.moving_point_original_pos = point_pos
                         self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.ClosedHandCursor))
                         break
-        super().mousePressEvent(event) # Call super class method
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self.moving_point_index != -1:
-            # Get mouse position relative to PlotWidget
             local_pos = self.plot_widget.mapFromGlobal(event.globalPosition().toPoint())
-            
-            # Map local position to ViewBox coordinates
             mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(self.plot_widget.mapToScene(local_pos))
             x, y = mouse_point.x(), mouse_point.y()
             
-            # Update the point's data
             self.plotted_data[self.moving_point_index]['data'] = np.array([[x, y]])
             new_text = f"Eq. Point ({x:.3f}, {y:.3f})"
             self.plotted_data[self.moving_point_index]['text'] = new_text
             self.plotted_data[self.moving_point_index]['list_item'].setText(new_text)
             
             self.redraw_plots()
-        super().mouseMoveEvent(event) # Call super class method
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if self.moving_point_index != -1:
             self.moving_point_index = -1
             self.moving_point_original_pos = None
             self.setCursor(QtGui.QCursor(pg.QtCore.Qt.CursorShape.ArrowCursor))
-        super().mouseReleaseEvent(event) # Call super class method
+        super().mouseReleaseEvent(event)
 
     def calculate_angle_between_lines(self):
         selected_items = self.data_list_widget.selectedItems()
@@ -744,7 +765,7 @@ class AdvancedCalculator(QMainWindow):
         return None
 
 if __name__ == "__main__":
-    # Force X11 backend to avoid Wayland crashes
+    # Force X11 backend to avoid Wayland crashes on some Linux systems (like Crostini)
     os.environ['QT_QPA_PLATFORM'] = 'xcb'
     app = QApplication(sys.argv)
     main_win = AdvancedCalculator()
